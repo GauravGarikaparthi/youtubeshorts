@@ -33,6 +33,7 @@ import os
 import re
 
 from performance_optimizer import (
+    audio_levels,
     has_audio_stream,
     log,
     media_duration,
