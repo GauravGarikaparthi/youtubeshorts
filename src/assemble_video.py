@@ -509,65 +509,13 @@ def assemble_video(
             f"[1:a]{voice_af},aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[voice];"
             f"[2:a]volume={_linear_to_db(config.music_volume):.1f}dB,"
             f"aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[music];"
-            f"[voice][music]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[mix];"
-            f"[mix]asplit=2[abody][ahead];"
-            f"[ahead]atrim=0:{fade:.3f},asetpts=PTS-STARTPTS[ah];"
-            f"[abody][ah]acrossfade=d={fade:.3f}:c1=tri:c2=tri[aout]"
+            f"[voice][music]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]"
         )
     else:
         filter_complex = (
-            f"[1:a]{voice_af},aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[mix];"
-            f"[mix]asplit=2[abody][ahead];"
-            f"[ahead]atrim=0:{fade:.3f},asetpts=PTS-STARTPTS[ah];"
-            f"[abody][ah]acrossfade=d={fade:.3f}:c1=tri:c2=tri[aout]"
+            f"[1:a]{voice_af},"
+            f"aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[aout]"
         )
-
-    cmd += ["-filter_complex", filter_complex]
-    if vf_parts:
-        cmd += ["-vf", ",".join(vf_parts)]
-    cmd += [
-        "-map", "0:v:0", "-map", "[aout]",
-        *video_encode_args(),
-        "-threads", "0",
-        "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
-        "-t", f"{voice_duration:.3f}",
-        "-movflags", "+faststart",
-        out_path,
-    ]
-
-    try:
-        run_ffmpeg(cmd, desc="final assembly")
-    except RuntimeError:
-        # acrossfade can fail on very short VO; mux a simpler mix.
-        log("Looped audio mix failed -- falling back to linear mix.")
-        fallback = ["-i", picture_path, "-i", voiceover_path]
-        if music_path:
-            fallback += ["-stream_loop", "-1", "-i", music_path]
-            fallback += [
-                "-filter_complex",
-                (
-                    f"[1:a]{voice_af}[voice];"
-                    f"[2:a]volume={_linear_to_db(config.music_volume):.1f}dB[music];"
-                    "[voice][music]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]"
-                ),
-            ]
-        else:
-            fallback += [
-                "-filter_complex",
-                f"[1:a]volume={voice_gain:.2f}[aout]",
-            ]
-        if vf_parts:
-            fallback += ["-vf", ",".join(vf_parts)]
-        fallback += [
-            "-map", "0:v:0", "-map", "[aout]",
-            *video_encode_args(),
-            "-threads", "0",
-            "-c:a", "aac", "-b:a", "192k",
-            "-t", f"{voice_duration:.3f}",
-            "-movflags", "+faststart",
-            out_path,
-        ]
-        run_ffmpeg(fallback, desc="fallback assembly")
 
     # ---- 7. POST-MUX VERIFICATION (never ship a mute/broken file) ------------
     if not has_audio_stream(out_path):
