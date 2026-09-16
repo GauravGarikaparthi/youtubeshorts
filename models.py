@@ -39,6 +39,7 @@ class AnimationParams(BaseModel):
 
 class SceneSection(BaseModel):
     section_num: int = Field(ge=1)
+    pace_marker: str = Field(default="MEDIUM", description="Pacing directive: FAST_CUT | MEDIUM | DRAMATIC_PAUSE | TRANSITION")
     voiceover_text: str = Field(min_length=1)
     image_prompt: str = Field(min_length=1)
     animation: AnimationParams
@@ -46,8 +47,11 @@ class SceneSection(BaseModel):
 
 
 class ScriptPackage(BaseModel):
-    title: str = Field(min_length=1)
-    hook: str = Field(min_length=1, description="Opening hook line")
+    title: str = Field(min_length=1, description="SEO-friendly, high-CTR video title")
+    hook: str = Field(min_length=1, description="Opening hook line delivered in the first 3-5 seconds")
+    description: str = Field(min_length=1, description="SEO-optimized video description with CTA")
+    tags: List[str] = Field(default_factory=list, description="List of SEO tags for YouTube metadata")
+    thumbnail_prompt: str = Field(min_length=1, description="DALL-E/Flux prompt for generating a high-CTR thumbnail")
     sections: List[SceneSection] = Field(min_length=1)
     estimated_total_duration_seconds: float = Field(ge=10.0)
 
@@ -69,9 +73,19 @@ class GeneratedAsset(BaseModel):
     duration_seconds: Optional[float] = None
 
 
+class VideoMetadata(BaseModel):
+    title: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+    tags: List[str] = Field(default_factory=list)
+    thumbnail_path: Optional[Path] = None
+    video_path: Optional[Path] = None
+
+
 class VideoPipelineResult(BaseModel):
     success: bool
     video_path: Optional[Path] = None
+    metadata: Optional[VideoMetadata] = None
+    metadata_json_path: Optional[Path] = None
     assets: List[GeneratedAsset] = Field(default_factory=list)
     logs: List[str] = Field(default_factory=list)
     error: Optional[str] = None

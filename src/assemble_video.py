@@ -15,7 +15,10 @@ Fixes layered on top of that core:
 1. AUDIO IS GUARANTEED -- the voiceover is validated BEFORE rendering (must
    exist, probe cleanly, contain a real audio stream, positive duration) and
    the FINISHED file is probed after muxing: a silent output RAISES instead
-   of shipping a mute Short.
+   of shipping a mute Short. This now includes a real LOUDNESS check
+   (audio_levels), not just stream presence -- a filter-graph bug can leave
+   behind a technically-valid but effectively silent stream that stream
+   presence alone would never catch.
 2. EXACTLY CENTERED CAPTIONS -- karaoke blocks are pinned at the true frame
    center (\\an5 at x=50%, y=50%), inside the Shorts UI safe zone.
 3. TEMPLATE-DRIVEN LOOK -- transitions, pacing, caption style, music level,
@@ -24,6 +27,15 @@ Fixes layered on top of that core:
 4. PERFORMANCE -- hardware H.264 encoders (VideoToolbox/NVENC) are
    auto-detected and used everywhere they exist; ffmpeg runs through a
    hardened wrapper (suppressed noise, stderr tail on failure, retries).
+5. AUDIO GRAPH SIMPLIFIED -- the mix no longer runs itself through an
+   acrossfade self-loop trick (splitting the mix, trimming a fade-length
+   copy of its own head, then crossfading that back into its own tail).
+   acrossfade concatenates two separate clips; using a crossfade duration
+   equal to the entire length of the second clip is an edge case it doesn't
+   handle cleanly, and could silently produce a near-silent blend even
+   though ffmpeg exits 0 and a real audio stream is present. The video's
+   seamless loop (_make_seamless_loop) already handles the "loop point"
+   feel on its own; the audio doesn't need to replicate that trick too.
 """
 
 from __future__ import annotations
@@ -33,6 +45,7 @@ import os
 import re
 
 from performance_optimizer import (
+    audio_levels,
     has_audio_stream,
     log,
     media_duration,
@@ -67,6 +80,10 @@ TITLE_FONT_SIZE = 52
 # ~10% linear (-20 dB) default music bed when no template overrides it.
 DEFAULT_MUSIC_VOLUME = 0.10
 VOICE_FADE_MS = 0.04
+
+# Post-mux loudness floor. Below this peak level, the output is treated as
+# effectively silent and the run fails rather than shipping a mute Short.
+SILENCE_PEAK_DB_THRESHOLD = -50.0
 
 
 def _escape_ffmpeg_path(path: str) -> str:
@@ -103,7 +120,7 @@ def _ass_timestamp(seconds: float) -> str:
 
 
 def _ass_escape(text: str) -> str:
-    return text.replace("\\", r"\\\\").replace("{", r"\{").replace("}", r"\}")
+    return text.replace("\\", r"\\").replace("{", r"\{").replace("}", r"\}")
 
 
 def _build_karaoke_ass(
@@ -124,6 +141,8 @@ def _build_karaoke_ass(
     font_size = ass_font_size(height)
     pos_x = width // 2          # <-- exact horizontal center (the fix)
     pos_y = int(height * 0.50)  # vertical center of the middle third
+    margin_l = int(width * 0.08)
+    margin_r = int(width * 0.12)
 
     header = (
         "[Script Info]\n"
@@ -495,6 +514,15 @@ def assemble_video(
             vf_parts.append(f"subtitles={_escape_ffmpeg_path(ass_path)}{fonts_arg}")
 
     # ---- 6. Audio graph: voice (gain + fades) over music (template level) ----
+    # Simplified from a prior version that ran the mix through an acrossfade
+    # self-loop trick (splitting the mix, trimming a fade-length copy of its
+    # own head, then crossfading that back into its own tail). acrossfade
+    # concatenates two separate clips; a crossfade duration equal to the
+    # ENTIRE length of the second clip is an edge case it doesn't handle
+    # cleanly, and could silently produce a near-silent blend even though
+    # ffmpeg exits 0 and a real audio stream is present. The video already
+    # has its own working seamless-loop pass (_make_seamless_loop above);
+    # the audio doesn't need to replicate that trick too.
     fade = min(LOOP_XFADE, max(voice_duration * 0.08, 0.15))
     voice_gain = max(0.2, min(3.0, config.voice_gain))
     voice_af = (
@@ -509,17 +537,12 @@ def assemble_video(
             f"[1:a]{voice_af},aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[voice];"
             f"[2:a]volume={_linear_to_db(config.music_volume):.1f}dB,"
             f"aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[music];"
-            f"[voice][music]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[mix];"
-            f"[mix]asplit=2[abody][ahead];"
-            f"[ahead]atrim=0:{fade:.3f},asetpts=PTS-STARTPTS[ah];"
-            f"[abody][ah]acrossfade=d={fade:.3f}:c1=tri:c2=tri[aout]"
+            f"[voice][music]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]"
         )
     else:
         filter_complex = (
-            f"[1:a]{voice_af},aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[mix];"
-            f"[mix]asplit=2[abody][ahead];"
-            f"[ahead]atrim=0:{fade:.3f},asetpts=PTS-STARTPTS[ah];"
-            f"[abody][ah]acrossfade=d={fade:.3f}:c1=tri:c2=tri[aout]"
+            f"[1:a]{voice_af},"
+            f"aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[aout]"
         )
 
     cmd += ["-filter_complex", filter_complex]
@@ -538,8 +561,9 @@ def assemble_video(
     try:
         run_ffmpeg(cmd, desc="final assembly")
     except RuntimeError:
-        # acrossfade can fail on very short VO; mux a simpler mix.
-        log("Looped audio mix failed -- falling back to linear mix.")
+        # Fallback for any other transient ffmpeg failure on this step; mux
+        # a simpler mix without the aformat/resample normalization.
+        log("Primary audio mix failed -- falling back to a simpler mix.")
         fallback = ["-i", picture_path, "-i", voiceover_path]
         if music_path:
             fallback += ["-stream_loop", "-1", "-i", music_path]
@@ -576,6 +600,25 @@ def assemble_video(
             "This would upload as a silent Short -- failing the run instead. "
             "Check the voiceover file and the ffmpeg audio filters above."
         )
+
+    # A stream can exist but carry near-zero-amplitude samples --
+    # has_audio_stream only confirms presence, not that it's audible.
+    # Measure real loudness and fail loudly rather than upload another
+    # silent-but-"valid" file.
+    try:
+        mean_db, max_db = audio_levels(out_path)
+        log(f"Post-mux audio levels: mean={mean_db:.1f}dB, max={max_db:.1f}dB.")
+        if max_db <= SILENCE_PEAK_DB_THRESHOLD:
+            raise RuntimeError(
+                f"Assembled output '{out_path}' has an audio stream but it is "
+                f"effectively silent (peak {max_db:.1f} dB). Failing the run instead "
+                "of uploading another silent Short."
+            )
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        log(f"Could not measure audio levels ({exc}) -- skipping loudness check.")
+
     out_duration = media_duration(out_path)
     if abs(out_duration - voice_duration) > 1.5:
         log(f"WARNING: output duration {out_duration:.2f}s differs from voiceover "

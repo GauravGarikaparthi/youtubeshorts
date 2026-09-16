@@ -1,6 +1,12 @@
 """
-Generates a 1080x1920 YouTube Shorts thumbnail: a center-cropped video frame
-with boosted color and a 3-word ultra-bold teaser in the upper-middle.
+Generates thumbnails for YouTube Shorts (1080x1920) and long-form videos
+(1280x720, 16:9).
+
+For Shorts: a center-cropped video frame with boosted color and a 3-word
+ultra-bold teaser in the upper-middle.
+For long-form: a high-contrast 16:9 frame with one clear focal point on the
+left and a max of 3 bold words (Visual Subtraction principle 5c).
+
 Requires ffmpeg for frame extraction. Uses Pillow only (already a dependency).
 """
 
@@ -14,6 +20,10 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 
 SHORTS_WIDTH = 1080
 SHORTS_HEIGHT = 1920
+
+# Long-form thumbnail: 16:9 aspect ratio (YouTube standard)
+LONFORM_WIDTH = 1280
+LONFORM_HEIGHT = 720
 
 FONT_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "fonts", "Montserrat-Bold.ttf"
@@ -81,9 +91,19 @@ def _draw_text_with_stroke(
     draw.text(xy, text, font=font, fill=fill, stroke_width=stroke_width, stroke_fill=stroke)
 
 
-def generate_thumbnail(video_path: str, title_text: str, out_path: str, _vertical: bool = False):
-    """Always emit the official Shorts still size (1080x1920). `vertical` is kept for API compat."""
-    width, height = SHORTS_WIDTH, SHORTS_HEIGHT
+def generate_thumbnail(video_path: str, title_text: str, out_path: str, _vertical: bool = False, longform: bool = False):
+    """
+    Generate a thumbnail for either Shorts (1080x1920) or long-form (1280x720).
+
+    _vertical:   legacy API-compat flag (Shorts portrait)
+    longform:    when True, emit a 16:9 1280x720 high-contrast thumbnail with
+                 one focal point on the left and max 3 bold words.
+    """
+    if longform:
+        width, height = LONFORM_WIDTH, LONFORM_HEIGHT
+    else:
+        width, height = SHORTS_WIDTH, SHORTS_HEIGHT
+
     frame_path = out_path.replace(".jpg", "_frame.jpg").replace(".png", "_frame.png")
     _extract_frame(video_path, frame_path)
 
@@ -94,36 +114,68 @@ def generate_thumbnail(video_path: str, title_text: str, out_path: str, _vertica
 
     overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
     overlay_draw = ImageDraw.Draw(overlay)
-    # Soft dark band behind the upper-middle teaser (not the bottom 20% CTA zone).
-    band_top = int(height * 0.22)
-    band_bottom = int(height * 0.48)
-    overlay_draw.rectangle([0, band_top, width, band_bottom], fill=(0, 0, 0, 150))
+
+    if longform:
+        # Long-form: one clear focal point on the LEFT, dark gradient band
+        # on the left side for text readability (Visual Subtraction, rule 5c).
+        band_right = int(width * 0.45)
+        overlay_draw.rectangle([0, 0, band_right, height], fill=(0, 0, 0, 120))
+    else:
+        # Shorts: soft dark band behind the upper-middle teaser
+        band_top = int(height * 0.22)
+        band_bottom = int(height * 0.48)
+        overlay_draw.rectangle([0, band_top, width, band_bottom], fill=(0, 0, 0, 150))
+
     img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
     draw = ImageDraw.Draw(img)
 
     hook = _three_word_hook(title_text)
     words = hook.split()
-    font_size = 118 if len(words) <= 3 else 96
-    font = _load_font(font_size)
-    max_text_width = width - 80
 
-    while font_size > 48:
-        widest = max((draw.textlength(w, font=font) for w in words), default=0)
-        if widest <= max_text_width:
-            break
-        font_size -= 6
+    if longform:
+        # Large, bold, left-side text for 16:9
+        font_size = 84 if len(words) <= 3 else 64
         font = _load_font(font_size)
+        max_text_width = int(width * 0.40)
 
-    line_height = int(font_size * 1.12)
-    block_height = line_height * max(len(words), 1)
-    y = int(height * 0.28) - block_height // 2
-    y = max(band_top + 16, y)
+        while font_size > 36:
+            widest = max((draw.textlength(w, font=font) for w in words), default=0)
+            if widest <= max_text_width:
+                break
+            font_size -= 6
+            font = _load_font(font_size)
 
-    for word in words:
-        text_w = draw.textlength(word, font=font)
-        x = int((width - text_w) / 2)
-        _draw_text_with_stroke(draw, (x, y), word, font, fill="#FFEE00", stroke="black", stroke_width=10)
-        y += line_height
+        line_height = int(font_size * 1.12)
+        block_height = line_height * max(len(words), 1)
+        y = int(height * 0.40) - block_height // 2
+
+        for word in words:
+            text_w = draw.textlength(word, font=font)
+            x = int(width * 0.08)  # left-side focal point
+            _draw_text_with_stroke(draw, (x, y), word, font, fill="#FFEE00", stroke="black", stroke_width=8)
+            y += line_height
+    else:
+        font_size = 118 if len(words) <= 3 else 96
+        font = _load_font(font_size)
+        max_text_width = width - 80
+
+        while font_size > 48:
+            widest = max((draw.textlength(w, font=font) for w in words), default=0)
+            if widest <= max_text_width:
+                break
+            font_size -= 6
+            font = _load_font(font_size)
+
+        line_height = int(font_size * 1.12)
+        block_height = line_height * max(len(words), 1)
+        y = int(height * 0.28) - block_height // 2
+        y = max(band_top + 16, y)
+
+        for word in words:
+            text_w = draw.textlength(word, font=font)
+            x = int((width - text_w) / 2)
+            _draw_text_with_stroke(draw, (x, y), word, font, fill="#FFEE00", stroke="black", stroke_width=10)
+            y += line_height
 
     img = img.filter(ImageFilter.UnsharpMask(radius=1, percent=80, threshold=3))
     img.save(out_path, quality=92, optimize=True)

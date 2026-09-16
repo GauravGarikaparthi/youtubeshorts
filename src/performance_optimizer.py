@@ -18,6 +18,7 @@ What lives here (and why):
 from __future__ import annotations
 
 import ctypes.util
+import re
 import json
 import os
 import platform
@@ -114,6 +115,26 @@ def has_audio_stream(path: str) -> bool:
     info = probe(path)
     return any(s.get("codec_type") == "audio" for s in info.get("streams", []))
 
+def audio_levels(path: str) -> tuple[float, float]:
+    """
+    Returns (mean_volume_db, max_volume_db) via ffmpeg's volumedetect filter.
+    Unlike has_audio_stream(), this confirms the audio is actually AUDIBLE,
+    not just present -- a filter-graph bug can produce a technically-valid,
+    all-silent stream that ffprobe alone would never catch.
+
+    Runs ffmpeg directly (not through run_ffmpeg()) because volumedetect's
+    stats print at "info" loglevel, which run_ffmpeg's "-loglevel error"
+    would otherwise suppress.
+    """
+    result = subprocess.run(
+        [ffmpeg_bin(), "-hide_banner", "-nostats", "-i", path, "-af", "volumedetect", "-f", "null", "-"],
+        capture_output=True, text=True,
+    )
+    mean_match = re.search(r"mean_volume:\s*(-?\d+(?:\.\d+)?)\s*dB", result.stderr)
+    max_match = re.search(r"max_volume:\s*(-?\d+(?:\.\d+)?)\s*dB", result.stderr)
+    if not mean_match or not max_match:
+        raise RuntimeError(f"Could not parse volumedetect output for '{path}'.")
+    return float(mean_match.group(1)), float(max_match.group(1))
 
 # ---------------------------------------------------------------------------
 # Encoder selection (cached once per process)

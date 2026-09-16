@@ -26,6 +26,10 @@ from performance_optimizer import media_duration
 WORK_DIR = "work"
 OUTPUT_DIR = "output"
 
+# Long-form video output directory
+LONGFORM_WORK_DIR = "work/longform"
+LONGFORM_OUTPUT_DIR = "output/longform"
+
 # Voiceover uses Piper (local, no API key needed) -- not in this list.
 REQUIRED_ENV_VARS = [
     "GROQ_API_KEY",
@@ -154,6 +158,32 @@ def run():
         thumbnail_path=thumbnail_path,
         privacy_status=os.environ.get("YT_PRIVACY_STATUS", "public"),
     )
+
+    # Record upload for the optimization engine (recursive learning)
+    try:
+        from optimization_engine import get_engine
+        engine = get_engine()
+        record_path = os.path.join(WORK_DIR, "shorts_uploads.json")
+        import json
+        records = []
+        if os.path.exists(record_path):
+            with open(record_path, "r") as f:
+                records = json.load(f)
+        records.append({
+            "video_id": video_id,
+            "title": title,
+            "tags": package["tags"],
+            "thumbnail_text": package.get("thumbnail_hook", "")[:20],
+            "description_used": description,
+            "uploaded_at": __import__("datetime").datetime.utcnow().isoformat(),
+            "video_path": video_path,
+            "status": "uploaded_pending_analytics",
+        })
+        with open(record_path, "w") as f:
+            json.dump(records, f, indent=2)
+        print(f"[main] Recorded upload for optimization engine (video_id={video_id[:11]}).")
+    except Exception as e:
+        print(f"[main] WARNING: Could not record upload for optimization engine: {e}")
 
     print(f"\nDone! https://www.youtube.com/watch?v={video_id}")
 

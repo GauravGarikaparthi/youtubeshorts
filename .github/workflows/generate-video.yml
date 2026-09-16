@@ -25,14 +25,6 @@ on:
         options:
           - replicate_flux
           - together_flux
-      tts_provider:
-        description: "Text-to-speech provider"
-        required: false
-        default: "edge_tts"
-        type: choice
-        options:
-          - elevenlabs
-          - edge_tts
       video_gen_provider:
         description: "Video generation / animation provider"
         required: false
@@ -42,6 +34,26 @@ on:
           - replicate
           - together
           - huggingface
+      tts_provider:
+        description: "Text-to-speech provider"
+        required: false
+        default: "kokoro"
+        type: choice
+        options:
+          - kokoro
+          - piper
+          - elevenlabs
+          - edge_tts
+      kokoro_voice:
+        description: "Kokoro voice ID (en-us: am_adam, bf_emma, etc.)"
+        required: false
+        default: "am_adam"
+        type: string
+      piper_voice:
+        description: "Piper voice model name (e.g. en_US-amy-low)"
+        required: false
+        default: "en_US-amy-low"
+        type: string
       target_duration_seconds:
         description: "Target total video length (seconds)"
         required: false
@@ -52,11 +64,11 @@ on:
         required: false
         default: "1920x1080"
         type: string
-  schedule:
-    - cron: "0 8 * * *"
+    schedule:
+      - cron: "0 8 * * *"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   generate-video:
@@ -64,8 +76,10 @@ jobs:
     env:
       LLM_PROVIDER: ${{ github.event.inputs.llm_provider || 'gemini' }}
       IMAGE_GEN_PROVIDER: ${{ github.event.inputs.image_gen_provider || 'replicate_flux' }}
-      TTS_PROVIDER: ${{ github.event.inputs.tts_provider || 'edge_tts' }}
       VIDEO_GEN_PROVIDER: ${{ github.event.inputs.video_gen_provider || 'replicate' }}
+      TTS_PROVIDER: ${{ github.event.inputs.tts_provider || 'kokoro' }}
+      KOKORO_VOICE: ${{ github.event.inputs.kokoro_voice || 'am_adam' }}
+      PIPER_VOICE: ${{ github.event.inputs.piper_voice || 'en_US-amy-low' }}
       TARGET_DURATION_SECONDS: ${{ github.event.inputs.target_duration_seconds || '180' }}
       RESOLUTION: ${{ github.event.inputs.resolution || '1920x1080' }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -95,6 +109,38 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends ffmpeg
 
+      - name: Cache Kokoro TTS model weights
+        uses: actions/cache@v4
+        with:
+          path: models
+          key: kokoro-models-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+
+      - name: Download Kokoro TTS model files (skip if cached)
+        run: |
+          mkdir -p models
+          if [ ! -f models/kokoro-v1.0.onnx ]; then
+            echo "Downloading Kokoro model weights..."
+            curl -sL -o models/kokoro-v1.0.onnx \
+              https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx
+            curl -sL -o models/voices-v1.0.bin \
+              https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin
+          fi
+
+      - name: Cache Piper voice models
+        uses: actions/cache@v4
+        with:
+          path: voices
+          key: piper-voices-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+
+      - name: Download Piper voice model (if piper TTS selected and not cached)
+        if: ${{ env.TTS_PROVIDER == 'piper' }}
+        run: |
+          mkdir -p voices
+          if [ ! -f voices/${{ env.PIPER_VOICE }}.onnx ]; then
+            echo "Downloading Piper voice '${{ env.PIPER_VOICE }}'..."
+            python -m piper.download_voices ${{ env.PIPER_VOICE }} --data-dir voices
+          fi
+
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
@@ -107,14 +153,27 @@ jobs:
         run: |
           python orchestrator.py
 
+      - name: Evaluate prior videos and feed optimization engine
+        if: always()
+        run: |
+          python src/evaluate_pending.py || true
+
       - name: Upload final video artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: final-video
-          path: output/final_video.mp4
+          name: longform-video-output
+          path: |
+            output/final_video.mp4
+            output/metadata.json
+            output/thumbnail.png
+            work/
+            work/virality_history.json
+            work/optimization_state.json
+            work/longform_uploads.json
+            work/shorts_uploads.json
           retention-days: 7
-          if-no-files-found: ignore
+          if-no-files-found: warn
 
       - name: Upload pipeline logs
         if: always()
@@ -124,12 +183,3 @@ jobs:
           path: work/*.log
           retention-days: 7
           if-no-files-found: ignore
-
-      - name: Commit generated assets back to repo
-        if: success()
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add output/ work/ || true
-          git diff --cached --quiet || git commit -m "chore(ai-video): add generated video and assets [skip ci]"
-          git push
