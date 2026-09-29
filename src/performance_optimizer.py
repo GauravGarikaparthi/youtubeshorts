@@ -115,6 +115,91 @@ def has_audio_stream(path: str) -> bool:
     info = probe(path)
     return any(s.get("codec_type") == "audio" for s in info.get("streams", []))
 
+
+def _sample_frame_rgb(path: str, timestamp: float) -> bytes:
+    result = subprocess.run(
+        [
+            ffmpeg_bin(),
+            "-v",
+            "error",
+            "-ss",
+            f"{max(timestamp, 0.0):.3f}",
+            "-i",
+            path,
+            "-frames:v",
+            "1",
+            "-vf",
+            "scale=64:36:flags=fast_bilinear",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "-",
+        ],
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.decode(errors="replace")[-2000:])
+    expected = 64 * 36 * 3
+    if len(result.stdout) < expected:
+        raise RuntimeError(f"Could not sample a complete frame from {path}")
+    return result.stdout[:expected]
+
+
+def validate_video_content(path: str) -> None:
+    """Reject corrupt, mute, or effectively solid-color video output."""
+    info = probe(path)
+    streams = info.get("streams", [])
+    if not any(stream.get("codec_type") == "video" for stream in streams):
+        raise RuntimeError(f"No video stream found in {path}")
+    if not has_audio_stream(path):
+        raise RuntimeError(f"No audio stream found in {path}")
+
+    duration = media_duration(path)
+    if duration <= 0:
+        raise RuntimeError(f"Video duration is invalid for {path}")
+
+    timestamps = sorted(
+        {
+            0.0,
+            duration * 0.25,
+            duration * 0.5,
+            duration * 0.75,
+            max(0.0, duration - 0.25),
+        }
+    )
+    samples = []
+    for timestamp in timestamps:
+        data = _sample_frame_rgb(path, timestamp)
+        channels = [data[index : index + 3] for index in range(0, len(data), 3)]
+        means = tuple(
+            sum(channel[index] for channel in channels) / len(channels)
+            for index in range(3)
+        )
+        variance = sum(
+            (channel[index] - means[index]) ** 2
+            for channel in channels
+            for index in range(3)
+        ) / len(channels)
+        samples.append((means, variance))
+
+    if not samples:
+        raise RuntimeError(f"No frames could be sampled from {path}")
+    max_spatial_variance = max(variance for _, variance in samples)
+    max_temporal_distance = max(
+        (
+            sum((left[index] - right[index]) ** 2 for index in range(3)) ** 0.5
+        )
+        for left, _ in samples
+        for right, _ in samples
+    )
+    if max_spatial_variance < 8 and max_temporal_distance < 3:
+        raise RuntimeError(
+            f"Video content validation failed for {path}: sampled frames are "
+            "effectively a solid color. Refusing to upload a blank video."
+        )
+
+
 def audio_levels(path: str) -> tuple[float, float]:
     """
     Returns (mean_volume_db, max_volume_db) via ffmpeg's volumedetect filter.

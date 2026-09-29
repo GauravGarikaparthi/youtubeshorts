@@ -2,7 +2,7 @@
 SEO / GEO / AEO optimization engine for regular long-form videos.
 
 Provides:
-  - High-CTR title generation (curiosity gap + primary keyword first)
+  - High-CTR title generation (primary keyword first, factual value, truthful modifiers)
   - Trending tag generation (broad + long-tail mix)
   - SEO-optimized description (keyword-rich first 2 lines, chapter timestamps,
     subscribe CTA)
@@ -29,6 +29,7 @@ from datetime import datetime
 
 from groq import Groq
 from _sanitize import sanitize_credential
+from title_utils import format_youtube_title
 
 
 LOG_PREFIX = "[seo_optimizer]"
@@ -42,22 +43,9 @@ def log(message: str) -> None:
 # SEO/GEO/AEO power-word banks
 # ---------------------------------------------------------------------------
 
-CURIOUS_POWER_WORDS = [
-    "secret", "hidden", "untold", "shocking", "unbelievable", "revealed",
-    "mistake", "lie", "truth", "proven", "hack", "trick", "shortcut",
-    "breakthrough", "genius", "forbidden", "debunked", "exposed",
-]
-
-URGENCY_POWER_WORDS = [
-    "now", "today", "instantly", "immediately", "fast", "quick",
-    "easy", "simple", "ultimate", "complete", "full", "master",
-    "guide", "blueprint", "formula", "system",
-]
-
-CTR_BOOSTERS = [
-    "You Won't Believe", "This Changes Everything", "Everyone Is Wrong",
-    "Here's Why", "The Real Reason", "What They Don't Want You To Know",
-    "The Truth About", "How to Master", "The Secret to", "Why Everyone",
+VALUE_POWER_WORDS = [
+    "best", "easy", "ultimate", "simple", "proven", "essential",
+    "complete", "practical", "clear", "key",
 ]
 
 # Primary keywords for spoken keyword sync (rule 7b)
@@ -88,9 +76,8 @@ class SEOOptimizer:
     """
     Generates SEO/GEO/AEO-optimized metadata for long-form videos.
 
-    Uses a combination of rule-based power-word injection and LLM refinement
-    (via Groq) for high-CTR titles, trending tags, and keyword-rich
-    descriptions with chapter timestamps.
+    Uses rule-based title formatting for factual, keyword-first metadata, with
+    optional Groq refinement for tags and descriptions.
     """
 
     def __init__(self, groq_api_key: Optional[str] = None):
@@ -105,56 +92,41 @@ class SEOOptimizer:
     # Title generation
     # ------------------------------------------------------------------
 
+    def _regular_title_modifier(self, topic: str) -> str:
+        lowered = (topic or "").lower()
+        if re.search(r"\b(how to|tutorial|guide|learn|fix|make)\b", lowered):
+            return "Easy Guide"
+        if re.search(r"\b(best|top|review|ranking|vs)\b", lowered):
+            return "Best Guide"
+        if re.search(r"\b(history|story|facts|explained|science)\b", lowered):
+            return "Key Facts"
+        return "Ultimate Guide"
+
+    def _title_value_phrase(self, topic: str) -> str:
+        lowered = (topic or "").lower()
+        if re.search(r"\b(how to|tutorial|guide|learn|fix|make)\b", lowered):
+            return "Easy Step-by-Step Guide"
+        if re.search(r"\b(best|top|review|ranking|vs)\b", lowered):
+            return "Best Options Explained"
+        if re.search(r"\d+", lowered):
+            return "Key Facts and Examples"
+        return "Key Facts You Can Use"
+
     def generate_ctr_title(self, topic: str, primary_keyword: str, performance_context: dict | None = None) -> str:
         """
-        Generate a high-CTR title:
-          - 60-80 characters
-          - Primary keyword first
-          - Curiosity-gap hook (rule 5a)
-          - Power words for CTR
+        Generate a factual title with the exact topic first, a strong modifier,
+        and a maximum length of 70 characters.
         """
-        # If we have historical performance data, bias toward the formula
-        # that worked before.
-        best_hook_template = None
-        if performance_context:
-            past_titles = performance_context.get("past_titles_with_high_ctr", [])
-            if past_titles:
-                best_hook_template = self._extract_hook_pattern(past_titles)
-
-        # Build hook
-        if best_hook_template:
-            title = best_hook_template.format(keyword=primary_keyword)
-        else:
-            power = CURIOUS_POWER_WORDS[len(topic) % len(CURIOUS_POWER_WORDS)]
-            urgency = URGENCY_POWER_WORDS[len(topic) % len(URGENCY_POWER_WORDS)]
-            hook_templates = [
-                f"The {power} Truth About {primary_keyword}",
-                f"Why {primary_keyword} Is More {urgency} Than You Think",
-                f"Everyone Gets {primary_keyword} Wrong — Here's the {power} Way",
-                f"The {power} Secret They Don't Want You To Know About {primary_keyword}",
-                f"How to {urgency.capitalize()} Master {primary_keyword} — {power.capitalize()} Revealed",
-            ]
-            title = hook_templates[len(topic) % len(hook_templates)]
-
-        # Ensure keyword is first
-        kw_lower = primary_keyword.lower()
-        if not title.lower().startswith(kw_lower):
-            title = f"{primary_keyword} {title}"
-
-        # Truncate to 80 chars
-        if len(title) > 80:
-            title = title[:77] + "..."
-
-        return title
-
-    def _extract_hook_pattern(self, past_titles: list[str]) -> Optional[str]:
-        """Extract the most successful title pattern from historical data."""
-        if not past_titles:
-            return None
-        # Simple heuristic: find the title with most words in common
-        # and extract its structural pattern
-        longest = max(past_titles, key=len)
-        return longest.replace(longest.split()[0], "{keyword}", 1)
+        keyword = (primary_keyword or topic).strip()
+        value_phrase = self._title_value_phrase(topic)
+        raw = f"{topic or keyword} — {value_phrase}"
+        if len(raw) < 60:
+            raw = f"{raw} — What You Need to Know"
+        return format_youtube_title(
+            raw,
+            keyword,
+            default_modifier=self._regular_title_modifier(topic),
+        )
 
     # ------------------------------------------------------------------
     # Tag generation
@@ -177,7 +149,7 @@ class SEOOptimizer:
             tags.add(kw.strip().lower())
 
         # Add power-word-enhanced tags
-        for word in CURIOUS_POWER_WORDS[:5]:
+        for word in VALUE_POWER_WORDS[:5]:
             tags.add(f"{topic} {word}")
 
         # Category tags
@@ -230,16 +202,16 @@ class SEOOptimizer:
             f"This video covers {primary_kw}, "
             f"{keywords[1] if len(keywords) > 1 else 'key insights'}, "
             f"and {keywords[2] if len(keywords) > 2 else 'practical applications'}. "
-            f"Stay tuned for the shocking truth at the end!"
+            f"Stay tuned for a clear summary and practical takeaways."
         )
 
         # Summary body
         summary_lines = [
-            f"In this video, we dive deep into {topic}.",
-            f"We explore {primary_kw} and how it impacts your everyday life.",
-            f"You'll discover the {CURIOUS_POWER_WORDS[0]} secrets that experts don't want you to miss.",
-            f"We also cover common {CURIOUS_POWER_WORDS[1]} mistakes people make with {topic}.",
-            f"By the end of this {int(estimated_duration / 60)}-minute video, you'll have a complete understanding of {topic}.",
+            f"In this video, we explain {topic} in a clear, practical way.",
+            f"We explore {primary_kw} and how it applies in real situations.",
+            f"You'll learn key details, common misconceptions, and useful takeaways.",
+            f"We also cover practical examples so you can understand {topic} with confidence.",
+            f"By the end of this {int(estimated_duration / 60)}-minute video, you'll have a clearer understanding of {topic}.",
         ]
 
         # Chapter timestamps
@@ -250,13 +222,13 @@ class SEOOptimizer:
                 secs = int(ts % 60)
                 chapter_lines.append(f"{mins:02d}:{secs:02d} — {label}")
         else:
-            chapter_lines.append("00:00 — Hook: The Shocking Truth")
+            chapter_lines.append("00:00 — Introduction and Key Question")
             chapter_lines.append("00:10 — What This Video Covers")
-            chapter_lines.append("01:00 — The Myth Everyone Believes")
-            chapter_lines.append("02:30 — Core Concept 1")
-            chapter_lines.append("04:30 — Core Concept 2")
-            chapter_lines.append("06:30 — The Deeper Truth")
-            chapter_lines.append("08:00 — The Payoff & Key Takeaway")
+            chapter_lines.append("01:00 — Core Concept")
+            chapter_lines.append("02:30 — Practical Example")
+            chapter_lines.append("04:30 — Common Misconceptions")
+            chapter_lines.append("06:30 — Deeper Explanation")
+            chapter_lines.append("08:00 — Key Takeaways")
 
         # CTA
         cta_lines = [
@@ -358,25 +330,29 @@ class SEOOptimizer:
     # Thumbnail text (AEO/CTR)
     # ------------------------------------------------------------------
 
-    def generate_thumbnail_text(self, title: str, performance_context: dict | None = None) -> str:
+    def generate_thumbnail_text(
+        self,
+        title: str,
+        performance_context: dict | None = None,
+        topic: str | None = None,
+    ) -> str:
         """
-        Generate max 3 bold words for the thumbnail (rule 5c).
-        Uses historical data to pick the highest-CTR word set.
+        Generate a short visual question for a regular-video thumbnail.
         """
-        # Extract key words from title
-        words = re.findall(r"\b[A-Z][a-z]+|[a-z]{3,}", title)
-        words = [w for w in words if w.lower() not in ("the", "and", "for", "with", "this")]
+        lowered = (topic or title).lower()
+        if re.search(r"\b(how to|tutorial|guide|learn|fix|make)\b", lowered):
+            question = "How It Works?"
+        elif re.search(r"\b(why|reason|cause)\b", lowered):
+            question = "Why It Matters?"
+        elif re.search(r"\b(best|top|review|ranking|vs)\b", lowered):
+            question = "Which One Wins?"
+        elif re.search(r"\b(history|story|events)\b", lowered):
+            question = "What Happened?"
+        else:
+            question = "What Matters?"
 
-        # Prefer 3 impactful words
-        bold_words = words[:3] if len(words) >= 3 else words
-
-        # If we have historical data, use the best-performing word set
-        if performance_context:
-            past_thumb = performance_context.get("best_thumbnail_text", "")
-            if past_thumb:
-                return past_thumb
-
-        return " ".join(bold_words[:3]).upper() if bold_words else "WATCH NOW"
+        words = [word for word in question.replace("?", "").split() if word]
+        return " ".join(words[:3]).upper() + "?"
 
     # ------------------------------------------------------------------
     # Caption (comment-section AEO engagement hook)
@@ -389,10 +365,10 @@ class SEOOptimizer:
         """
         primary_kw = keywords[0] if keywords else topic
         captions = [
-            f"🤯 Most people have {topic} completely backwards. Drop a 🧠 if you learned something new!",
-            f"The truth about {primary_kw} will change how you think forever. What surprised you most?",
-            f"This is the {topic} video nobody told you about. Save this for later — you'll need it.",
-            f"{int(70 + len(topic) % 30)}% of viewers get {topic} wrong. Are you in the 30% who know the truth?",
+            f"What is the most useful takeaway from {topic}? Share your answer below.",
+            f"Which part of {primary_kw} was most surprising to you?",
+            f"What question about {topic} should we explain next?",
+            f"Save this video if the practical examples helped you understand {topic}.",
         ]
         idx = len(topic) % len(captions)
         return captions[idx]
@@ -433,7 +409,7 @@ class SEOOptimizer:
         Run the full SEO/GEO/AEO optimization pipeline and return a
         SEOMetadata object with all fields populated.
         """
-        primary_keyword = keywords[0] if keywords else topic
+        primary_keyword = (topic or (keywords[0] if keywords else "")).strip()
 
         title = self.generate_ctr_title(topic, primary_keyword, performance_context)
         tags = self.generate_trending_tags(topic, keywords, performance_context)
@@ -441,7 +417,7 @@ class SEOOptimizer:
             topic, keywords, estimated_duration, chapters, performance_context
         )
         caption = self.generate_engaging_caption(topic, keywords)
-        thumbnail_text = self.generate_thumbnail_text(title, performance_context)
+        thumbnail_text = self.generate_thumbnail_text(title, performance_context, topic=topic)
         spoken_keywords = self.extract_spoken_keywords(topic, keywords)
         faq_schema = self.generate_aeo_faq(topic, keywords)
         structured_data = self.generate_aeo_structured_data(topic, title, description)
@@ -482,7 +458,8 @@ Current title: {title}
 Current description: {description[:200]}...
 
 Produce refined_title, refined_description, and refined_tags as JSON.
-- Title: 60-80 chars, keyword first, curiosity-gap, high power words
+- Title: 60-70 characters maximum, exact topic first, factual value, truthful
+  strong modifier, no false clickbait, first letter capitalized
 - Description: 200-400 words, keyword-rich first 2 lines, chapter timestamps,
   subscribe CTA
 - Tags: 15-20 items mixing broad and long-tail keywords
@@ -503,8 +480,13 @@ Return ONLY valid JSON with keys: refined_title, refined_description, refined_ta
             if text.startswith("```"):
                 text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
             data = json.loads(text)
+            refined_title = data.get("refined_title", title)
             return {
-                "title": data.get("refined_title", title),
+                "title": format_youtube_title(
+                    refined_title,
+                    topic,
+                    default_modifier=self._regular_title_modifier(topic),
+                ),
                 "description": data.get("refined_description", description),
                 "tags": data.get("refined_tags", tags),
             }

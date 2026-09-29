@@ -1,30 +1,29 @@
-name: Daily YouTube Shorts (5x/day)
+name: Daily YouTube Shorts (6x/day)
 
 on:
   schedule:
-    # 5 Shorts per day: 02:00, 06:00, 10:00, 14:00, 18:00 UTC
-    - cron: "0 2,6,10,14,18 * * *"
+    # 6 Shorts per day: 00:00, 04:00, 08:00, 12:00, 16:00, 20:00 UTC
+    - cron: "0 0,4,8,12,16,20 * * *"
   workflow_dispatch:
-   _inputs:
+    inputs:
       topic_mode:
         description: "How to pick today's topic"
         type: choice
         default: category
         options:
-          - trending
           - category
           - custom
       category:
-        description: "Category to pick from (used only if topic_mode = category)"
+        description: "Category to pick from. 'finance' researches the live web first and is the default."
         type: choice
-        default: motivation
+        default: finance
         options:
+          - finance
           - any
           - facts
           - science
           - history
           - motivation
-          - finance
           - animals
           - personality
           - sports
@@ -42,19 +41,8 @@ on:
         type: choice
         default: shorts
         options:
-          - video
           - shorts
-      visual_style:
-        description: "Visuals: pexels (real stock footage) or illustration (AI-generated images via Pollinations)"
-        type: choice
-        default: pexels
-        options:
-          - pexels
-          - illustration
-      custom_visual_prompt:
-        description: "Exact image prompt for AI illustrations (used only if visual_style = illustration). Drives VISUALS only -- never spoken as narration."
-        type: string
-        default: ""
+          - video
       language:
         description: "Script + voiceover language (Piper has no Urdu voice yet)"
         type: choice
@@ -70,6 +58,14 @@ on:
           - russian
           - turkish
           - chinese
+      yt_privacy_status:
+        description: "YouTube upload privacy"
+        type: choice
+        default: public
+        options:
+          - public
+          - private
+          - unlisted
 
 jobs:
   build-and-upload:
@@ -99,14 +95,6 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
-      - name: Cache Piper voice models
-        uses: actions/cache@v4
-        with:
-          path: voices
-          key: piper-voices-${{ github.run_id }}
-          restore-keys: |
-            piper-voices-
-
       - name: Cache Kokoro TTS model files
         uses: actions/cache@v4
         with:
@@ -121,17 +109,27 @@ jobs:
           [ -f models/voices-v1.0.bin ] || curl -sL -o models/voices-v1.0.bin \
             https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin
 
+      - name: Evaluate pending Shorts analytics (recursive learning engine)
+        # Before generating a new Short, pull analytics for previously-uploaded
+        # videos whose data is now available (24-48h after upload) so the next
+        # run can learn from what actually performed.
+        if: always()
+        continue-on-error: true
+        env:
+          YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
+          YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+          YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+        run: python src/evaluate_pending.py || true
+
       - name: Run daily shorts pipeline
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
           TOPIC_MODE: ${{ github.event.inputs.topic_mode || 'category' }}
-          TOPIC_CATEGORY: ${{ github.event.inputs.category || 'motivation' }}
+          TOPIC_CATEGORY: ${{ github.event.inputs.category || 'finance' }}
           CUSTOM_TOPIC: ${{ github.event.inputs.custom_topic || '' }}
-          VIDEO_MODE: shorts
-          VISUAL_STYLE: ${{ github.event.inputs.visual_style || 'pexels' }}
-          CUSTOM_VISUAL_PROMPT: ${{ github.event.inputs.custom_visual_prompt || '' }}
+          VIDEO_MODE: ${{ github.event.inputs.video_mode || 'shorts' }}
           LANGUAGE: ${{ github.event.inputs.language || 'english' }}
           YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
           YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
@@ -147,5 +145,14 @@ jobs:
           path: |
             output/video.mp4
             output/thumbnail.jpg
+            work/finance_history.json
+            work/shorts_uploads.json
+            work/virality_history.json
+            work/optimization_state.json
           retention-days: 14
           if-no-files-found: warn
+
+      - name: Run virality report
+        if: always()
+        run: |
+          python3 -c "import sys; sys.path.insert(0, 'src'); from optimization_engine import get_engine; import json; engine = get_engine(); print(json.dumps(engine.get_performance_summary(), indent=2))" 2>/dev/null || echo "No optimization data yet."

@@ -13,6 +13,7 @@ from groq import Groq
 
 from _sanitize import sanitize_credential
 from languages import DEFAULT_LANGUAGE, name_for_language
+from title_utils import SHORTS_TAG, format_youtube_title
 
 MODEL = "openai/gpt-oss-120b"
 
@@ -20,8 +21,6 @@ MODEL = "openai/gpt-oss-120b"
 MIN_NARRATION_WORDS = 120
 MAX_NARRATION_WORDS = 135
 MAX_SPOKEN_SECONDS = 55
-MAX_TITLE_CHARS = 50
-SHORTS_TAG = "#shorts"
 
 
 def _language_instruction(language: str) -> str:
@@ -36,7 +35,8 @@ def _language_instruction(language: str) -> str:
 SYSTEM_PROMPT = """You write scripts for faceless YouTube Shorts and you are also an SEO \
 copywriter for YouTube.
 
-FORMAT: vertical Shorts only. Spoken length is 50-55 seconds — never longer. \
+FORMAT: YouTube video package. Follow the requested duration and aspect ratio. \
+Spoken length is 50-55 seconds for Shorts — never longer. \
 That is a hard cap, not a target to pad toward.
 
 VOICE: Write like a sharp, friendly expert explaining this to a smart friend over coffee -- \
@@ -67,13 +67,54 @@ caption cleanly.
 LENGTH CAPS (hard limits, do not exceed):
 - narration: 120-135 words total (50-55 seconds spoken at ~150 wpm). Count the words. \
   If you are over 135, cut beats until you are under.
-- title: under 50 characters INCLUDING the trailing " #shorts". Primary keyword is \
-  the FIRST words of the title, then the hook, then " #shorts".
+- title: 60 to 70 characters, never over 70, INCLUDING " #shorts" for Shorts. Put the exact \
+  target search term at the very beginning, capitalize the first letter, add a truthful \
+  strong modifier or number, state the factual value or answer, and never use false \
+  clickbait. The thumbnail should ask the visual question while the title gives the answer.
 - description: first line is exactly "#shorts". Then 3-5 SEO sentences. Soft CTA to subscribe.
 - tags: 8-12 items, include "shorts".
 
 Clear simple sentences, no fluff, no stage directions, no headers - just spoken narration \
 text. Return ONLY valid JSON, no markdown fences, no preamble."""
+
+
+def _bullet_block(title: str, items: list[str] | None) -> str:
+    """Renders a titled bullet list, or '' when there is nothing to render."""
+    lines = [str(item).strip() for item in (items or []) if str(item).strip()]
+    if not lines:
+        return ""
+    body = "\n".join(f"- {line}" for line in lines)
+    return f"\n\n{title}\n{body}"
+
+
+def _research_block(
+    pain_points: list[str] | None,
+    headlines: list[str] | None,
+    strategy: list[str] | None,
+    compliance: list[str] | None,
+) -> str:
+    """
+    Turns this run's live internet research into prompt instructions: the real
+    questions to answer (AEO targets), fresh headlines for phrasing context
+    (never copied), the SEO/AEO content strategy, and finance guardrails.
+    """
+    return "".join([
+        _bullet_block(
+            "REAL QUESTIONS people are asking about this topic right now (answer the "
+            "single best-fitting one outright in your first lines -- this is what AI "
+            "answer engines and featured snippets quote):",
+            pain_points,
+        ),
+        _bullet_block(
+            "Fresh headlines touching this topic today. Use them ONLY to borrow common "
+            "everyday phrasing. Do NOT copy, quote, or paraphrase any headline:",
+            headlines,
+        ),
+        _bullet_block("CONTENT STRATEGY (SEO + AEO) you must follow:", strategy),
+        _bullet_block(
+            "ACCURACY AND SAFETY RULES that override everything else:", compliance
+        ),
+    ])
 
 
 def _word_count(text: str) -> int:
@@ -93,33 +134,14 @@ def _trim_narration(narration: str) -> str:
 
 
 def _primary_keyword(input_topic: str, seo_keywords: list[str] | None) -> str:
-    if seo_keywords:
-        candidate = seo_keywords[0].strip()
+    topic = (input_topic or "").strip()
+    if topic:
+        return topic
+    for candidate in seo_keywords or []:
+        candidate = candidate.strip()
         if candidate:
             return candidate
-    return input_topic.strip()
-
-
-def _format_title(raw: str, keyword: str) -> str:
-    """Keyword-first title, under 50 chars, with #shorts at the end."""
-    cleaned = re.sub(r"#shorts\b", "", raw or "", flags=re.IGNORECASE).strip()
-    cleaned = re.sub(r"\s+", " ", cleaned)
-    keyword = re.sub(r"#shorts\b", "", keyword or "", flags=re.IGNORECASE).strip()
-
-    if keyword and not cleaned.lower().startswith(keyword.lower()):
-        cleaned = f"{keyword} {cleaned}".strip()
-
-    suffix = f" {SHORTS_TAG}"
-    budget = MAX_TITLE_CHARS - len(suffix)
-    if budget < 8:
-        return (keyword[: max(MAX_TITLE_CHARS - len(suffix), 1)] + suffix)[:MAX_TITLE_CHARS]
-
-    if len(cleaned) > budget:
-        cut = cleaned[:budget].rsplit(" ", 1)[0].rstrip("-–|,")
-        cleaned = cut if cut else cleaned[:budget]
-
-    title = f"{cleaned}{suffix}"
-    return title[:MAX_TITLE_CHARS]
+    return ""
 
 
 def _format_description(description: str) -> str:
@@ -128,7 +150,12 @@ def _format_description(description: str) -> str:
     return f"{SHORTS_TAG}\n{body}".strip()
 
 
-def _normalize_package(package: dict, base_topic: str, seo_keywords: list[str] | None) -> dict:
+def _normalize_package(
+    package: dict,
+    base_topic: str,
+    seo_keywords: list[str] | None,
+    is_shorts: bool = True,
+) -> dict:
     if not isinstance(package, dict):
         raise RuntimeError("Groq returned JSON that is not an object.")
 
@@ -141,19 +168,25 @@ def _normalize_package(package: dict, base_topic: str, seo_keywords: list[str] |
     if isinstance(tags, str):
         tags = [t.strip() for t in tags.split(",") if t.strip()]
     tags = [str(t).strip() for t in tags if str(t).strip()]
-    if "shorts" not in {t.lower() for t in tags}:
+    if is_shorts and "shorts" not in {t.lower() for t in tags}:
         tags = ["shorts", *tags]
     visual = package.get("visual_keywords") or []
     if isinstance(visual, str):
         visual = [visual]
 
+    title = format_youtube_title(
+        str(package.get("title") or base_topic),
+        keyword,
+        suffix=f" {SHORTS_TAG}" if is_shorts else "",
+        default_modifier="Easy Guide",
+    )
     return {
-        "title": _format_title(str(package.get("title") or base_topic), keyword),
+        "title": title,
         "description": _format_description(str(package.get("description") or "")),
         "tags": tags[:12],
         "narration": narration,
         "visual_keywords": [str(v).strip() for v in visual if str(v).strip()][:8],
-        "thumbnail_hook": " ".join(_format_title(str(package.get("title") or base_topic), keyword).split()[:3]),
+        "thumbnail_hook": " ".join(title.split()[:3]),
     }
 
 
@@ -162,16 +195,25 @@ def generate_script(
     seo_keywords: list[str] | None = None,
     api_key: str | None = None,
     language: str = DEFAULT_LANGUAGE,
+    is_shorts: bool = True,
+    pain_points: list[str] | None = None,
+    headlines: list[str] | None = None,
+    strategy: list[str] | None = None,
+    compliance: list[str] | None = None,
 ):
     """
     Returns a dict:
     {
-        "title": str,          # <=50 chars, keyword-first, includes #shorts
-        "description": str,    # first line is #shorts
+        "title": str,          # <=70 chars, keyword-first, factual
+        "description": str,    # first line is #shorts for Shorts
         "tags": [str, ...],
         "narration": str,      # full voiceover script, <=135 words
         "visual_keywords": [str, ...]
     }
+
+    pain_points / headlines / strategy / compliance come from this run's live
+    internet research (see finance_research.py). They are all optional -- the
+    generator works without them, just with less SEO/AEO context.
     """
     client = Groq(api_key=sanitize_credential(api_key or os.environ["GROQ_API_KEY"]))
 
@@ -186,39 +228,42 @@ phrasing hints, never as a replacement for the topic itself:
 {keyword_list}
 
 SEO requirements (all secondary to staying on-topic):
-- The PRIMARY keyword (prefer the first phrase above if it fits) MUST be the first
-  words of the title. Then the hook. Then " #shorts". Total title under 50 characters.
-- If none of these phrases genuinely fit, use the topic itself as the primary keyword
-  at the start of the title. Do NOT bend the video's subject to match a keyword.
-- Same rule for the description and tags: use a phrase only where it's a natural,
-  accurate fit for content actually in the narration
-- Do NOT keyword-stuff - it must still read naturally to a human"""
+- The exact target topic MUST be the first words of the title. Keep the title at most
+  70 characters including " #shorts", capitalize its first letter, and add a truthful
+  number, bracket, or power modifier such as "easy," "best," or "ultimate."
+- Make the title a factual answer or specific value; avoid "you won't believe,"
+  "shocking," "forbidden secret," and other false clickbait.
+- Use SEO phrases only where they are a natural, accurate fit for the narration.
+- Do NOT keyword-stuff; the title and thumbnail must complement each other."""
+
+    research_block = _research_block(pain_points, headlines, strategy, compliance)
 
     user_prompt = f"""Topic (the video MUST be specifically about this -- do not drift to a \
-related but different subject, even if the SEO keywords below point elsewhere): {base_topic}{keyword_block}
+related but different subject, even if the SEO keywords below point elsewhere): {base_topic}{keyword_block}{research_block}
 
-Create a faceless YouTube Shorts package on this exact topic. Spoken narration MUST fit \
-in 50-55 seconds (120-135 words). The first sentence is the 3-second hook.
+Create a faceless YouTube video package on this exact topic. Spoken narration MUST fit \
+in 50-55 seconds for Shorts (120-135 words). The first sentence is the 3-second hook.
 
 Respond with ONLY this JSON structure:
 
 {{
-  "title": "PRIMARY KEYWORD then hook, under 40 characters before #shorts",
+  "title": "EXACT TOPIC first, factual value, strong modifier, max 70 chars including #shorts",
   "description": "#shorts as line 1, then 3-5 SEO sentences, subscribe CTA last",
   "tags": ["tag1", "tag2", "..."],
   "narration": "120-135 word spoken script. Sentence 1 is a 6-10 word high-tension hook.",
   "visual_keywords": ["keyword1", "keyword2", "keyword3", "..."]
 }}{_language_instruction(language)}
 
-visual_keywords should always be in English regardless of the response language above -- they're only \
-used to search stock footage, never shown to a viewer. They should be 5-8 concrete, filmable nouns/scenes \
-(e.g. "ocean waves", "city traffic at night") that match the narration. These keywords are used to search a \
-royalty-free STOCK footage library that has no footage of any real, named person, brand, or copyrighted \
-movie/show/game -- so NEVER use a person's name, a show/movie/game title, a team name, or a brand as a \
-keyword, even if the topic is about a specific person or franchise. Instead describe the generic \
-scene/action/mood the narration evokes (e.g. for a footballer, use "soccer player scoring \
-goal" or "stadium crowd cheering", not the player's name; for a fantasy show, use "dragon flying over \
-castle" or "knights sword fight", not the show's name or any character name)."""
+visual_keywords are the SEARCH TERMS for a royalty-free STOCK VIDEO library and are never shown to a viewer, \
+so always write them in English regardless of the response language above. Give 5-8 short, concrete, \
+filmable visual subjects that MOVING footage can actually show -- this library is searched for video, not \
+still images, so describe an action or a shot in motion ("piggy bank savings growing", "person budgeting \
+on a phone", "stock market charts on screen", "coins stacking on a desk", "calculator and paperwork close \
+up"), never an abstract noun like "money" or "success". Match the narration beat for beat. Because this \
+library holds only non-copyright stock footage, NEVER use a real person's name, a company or brand name, \
+a show/movie/game title, a team, or any copyrighted character as a keyword. Describe the generic scene \
+instead (e.g. for a footballer use "soccer player scoring goal" or "stadium crowd cheering", never the \
+player's or the club's name)."""
 
     response = None
     last_error = None
@@ -246,6 +291,9 @@ castle" or "knights sword fight", not the show's name or any character name)."""
             user_prompt = (
                 f"Write a JSON object with keys title, description, tags, narration, visual_keywords "
                 f"about: {base_topic}. Narration must be 120-135 words. "
+                f"Answer one of the listed real questions directly, and obey the accuracy "
+                f"and safety rules above."
+                f"{research_block}"
                 f"Return ONLY valid JSON, no markdown."
             )
 
@@ -265,7 +313,7 @@ castle" or "knights sword fight", not the show's name or any character name)."""
     except json.JSONDecodeError as exc:
         raise RuntimeError("Groq returned invalid JSON for the script package.") from exc
 
-    return _normalize_package(package, base_topic, seo_keywords)
+    return _normalize_package(package, base_topic, seo_keywords, is_shorts=is_shorts)
 
 
 if __name__ == "__main__":

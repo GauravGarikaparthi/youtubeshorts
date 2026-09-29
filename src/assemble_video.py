@@ -43,6 +43,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import subprocess
 
 from performance_optimizer import (
     audio_levels,
@@ -50,7 +51,9 @@ from performance_optimizer import (
     log,
     media_duration,
     run_ffmpeg,
+    validate_video_content,
     video_encode_args,
+    ffmpeg_bin,
 )
 from template_utils import find_music_track
 from viral_captions import ass_font_size, ass_style_line
@@ -88,6 +91,63 @@ SILENCE_PEAK_DB_THRESHOLD = -50.0
 
 def _escape_ffmpeg_path(path: str) -> str:
     return path.replace("\\", "/").replace(":", "\\:").replace("'", r"\'")
+
+
+def _has_ffmpeg_filter(filter_name: str) -> bool:
+    result = subprocess.run(
+        [ffmpeg_bin(), "-hide_banner", "-filters"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return False
+    return bool(re.search(rf"\b{re.escape(filter_name)}\b", result.stdout))
+
+
+def _escape_drawtext_text(text: str) -> str:
+    return (
+        text.replace("\\", r"\\")
+        .replace("'", r"\'")
+        .replace(":", r"\:")
+        .replace("%", r"\%")
+        .replace(",", r"\,")
+    )
+
+
+def _drawtext_caption_filter(
+    chunks: list[dict],
+    seconds_per_word: float,
+    height: int,
+    work_dir: str,
+) -> list[str]:
+    font_size = ass_font_size(height)
+    fontfile_arg = (
+        f"fontfile='{_escape_ffmpeg_path(FONT_PATH)}':"
+        if os.path.isfile(FONT_PATH)
+        else ""
+    )
+    filters = []
+    cursor = 0.0
+    for index, chunk in enumerate(chunks):
+        words = chunk["text"].split()
+        if not words:
+            continue
+        start = cursor
+        end = start + len(words) * seconds_per_word
+        cursor = end
+        text_path = os.path.join(work_dir, f"caption_{index:03d}.txt")
+        with open(text_path, "w", encoding="utf-8") as handle:
+            handle.write(chunk["text"])
+        filters.append(
+            "drawtext="
+            f"{fontfile_arg}"
+            f"textfile='{_escape_ffmpeg_path(text_path)}':"
+            f"fontcolor=white:fontsize={font_size}:"
+            "borderw=5:bordercolor=black@0.95:"
+            "x=(w-text_w)/2:y=h*0.72:"
+            f"enable='between(t,{start:.3f},{end:.3f})'"
+        )
+    return filters
 
 
 def _write_caption_file(text: str, path: str) -> str:
@@ -489,7 +549,7 @@ def assemble_video(
     if config.eq:
         vf_parts.append(config.eq)  # grade the PICTURE; captions burn on after
 
-    if os.path.isfile(FONT_PATH):
+    if os.path.isfile(FONT_PATH) and _has_ffmpeg_filter("drawtext"):
         title_file = _write_caption_file(title_text, os.path.join(work_dir, "title.txt"))
         vf_parts.append(
             f"drawtext=fontfile='{_escape_ffmpeg_path(FONT_PATH)}':"
@@ -505,13 +565,22 @@ def assemble_video(
         total_words = sum(c["word_count"] for c in chunks) or 1
         if chunks:
             seconds_per_word = voice_duration / total_words
-            ass_path = os.path.join(work_dir, "captions.ass")
-            _build_karaoke_ass(
-                chunks, 0.0, seconds_per_word, width, height, ass_path,
-                style_key=config.caption_style,
-            )
-            fonts_arg = f":fontsdir={_escape_ffmpeg_path(FONTS_DIR)}" if os.path.isdir(FONTS_DIR) else ""
-            vf_parts.append(f"subtitles={_escape_ffmpeg_path(ass_path)}{fonts_arg}")
+            if not _has_ffmpeg_filter("subtitles") and _has_ffmpeg_filter("drawtext"):
+                vf_parts.extend(
+                    _drawtext_caption_filter(
+                        chunks, seconds_per_word, height, work_dir,
+                    )
+                )
+            elif _has_ffmpeg_filter("subtitles") and chunks:
+                ass_path = os.path.join(work_dir, "captions.ass")
+                _build_karaoke_ass(
+                    chunks, 0.0, seconds_per_word, width, height, ass_path,
+                    style_key=config.caption_style,
+                )
+                fonts_arg = f":fontsdir={_escape_ffmpeg_path(FONTS_DIR)}" if os.path.isdir(FONTS_DIR) else ""
+                vf_parts.append(f"subtitles={_escape_ffmpeg_path(ass_path)}{fonts_arg}")
+            elif chunks:
+                log("Caption text filters are unavailable; continuing without burned captions.")
 
     # ---- 6. Audio graph: voice (gain + fades) over music (template level) ----
     # Simplified from a prior version that ran the mix through an acrossfade
@@ -618,6 +687,8 @@ def assemble_video(
         raise
     except Exception as exc:
         log(f"Could not measure audio levels ({exc}) -- skipping loudness check.")
+
+    validate_video_content(out_path)
 
     out_duration = media_duration(out_path)
     if abs(out_duration - voice_duration) > 1.5:

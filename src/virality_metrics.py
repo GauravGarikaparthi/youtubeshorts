@@ -236,7 +236,7 @@ class ViralityEvaluator:
         if ctr < thresholds["ctr_percent"]:
             corrective_actions.append(
                 f"CTR is {ctr:.1f}% (threshold {thresholds['ctr_percent']}%). "
-                "Rewrite title with stronger curiosity-gap hook and refresh thumbnail with higher contrast."
+                "Rewrite the title with a factual keyword-first value statement and refresh the thumbnail with higher contrast."
             )
 
         # --- Average View Duration ---
@@ -259,7 +259,7 @@ class ViralityEvaluator:
         if first_15s < thresholds["first_15s_retention_percent"]:
             corrective_actions.append(
                 f"15s retention is {first_15s:.1f}% (threshold {thresholds['first_15s_retention_percent']}%). "
-                "Apply WTF formula, shocking fact opener, and change visual every 1-2s in the intro."
+                "Apply the WTF formula, open with a clear factual hook, and change the visual every 1-2s in the intro."
             )
 
         # --- First 30s retention ---
@@ -426,7 +426,7 @@ class ViralityEvaluator:
                 f"Viral videos average {avg_passed:.1f}% CTR vs {avg_failed:.1f}% for underperformers."
             )
             recommendations.append(
-                "Prioritize high-CTR titles: curiosity-gap hooks + primary keyword first."
+                "Prioritize factual keyword-first titles with a truthful strong modifier."
             )
 
         # Retention analysis
@@ -440,7 +440,7 @@ class ViralityEvaluator:
                 f"below {avg_fail:.0f}% they underperform."
             )
             recommendations.append(
-                "Apply WTF formula + shocking fact intro + visual change every 1-2s in first 10s."
+                "Apply the WTF formula with a clear factual hook and change the visual every 1-2s in the first 10s."
             )
 
         # Thumbnail text analysis

@@ -1,21 +1,38 @@
 # Auto YouTube Uploader
 
-Fully automated pipeline: finds a trending topic → writes a script → generates
-a voiceover → pulls stock footage → assembles a video → uploads to YouTube.
-Runs every four hours via GitHub Actions.
+Fully automated **Finance** Shorts pipeline: researches the live web for what
+people are asking about money right now → writes an SEO/AEO-optimised script →
+generates a voiceover → pulls royalty-free stock **video** → assembles a Short →
+uploads to YouTube. Publishes **6 Shorts a day** via GitHub Actions
+(00:00, 04:00, 08:00, 12:00, 16:00, 20:00 UTC).
 
 ## How it works
 
 ```
-trend_fetch.py       -> picks a trending topic (Google Trends, with fallback list)
-generate_script.py    -> Groq (gpt-oss-120b) writes title/description/tags/narration/keywords
+finance_research.py   -> scrapes Google News RSS, Reddit, Stack Exchange, YouTube
+                         autocomplete and Google Trends, then picks the best Finance
+                         topic for this run and extracts real questions to answer
+seo_research.py       -> YouTube autocomplete + Trends related queries (search phrases)
+generate_script.py    -> Groq (gpt-oss-120b) writes title/description/tags/narration,
+                         steered by the live research, AEO rules and finance safety rules
 generate_voiceover.py -> Kokoro (local TTS; Piper fallback) turns narration into a WAV
-fetch_visuals.py      -> Pexels downloads matching stock clips
+fetch_visuals.py      -> royalty-free stock VIDEO (Pexels -> Pixabay -> Mixkit), each
+                         download ffprobe-verified before use
 assemble_video.py     -> ffmpeg stitches clips + voiceover + title card
 generate_thumbnail.py -> Pillow makes a 1280x720 thumbnail from a video frame
 upload_youtube.py     -> YouTube Data API v3 uploads the final video
 main.py               -> runs all of the above in order
 ```
+
+### Finance research (runs on every upload)
+
+Every scheduled run scrapes four keyless public sources, scores the Finance topic
+pool against what it found, and heavily deprioritises topics used in the last few
+days (`work/finance_history.json`) so six daily uploads stay distinct. The live
+questions become answer-engine (AEO) targets the narration must answer outright.
+
+If the network is unavailable the module degrades quietly to the static topic
+pool rather than failing the run.
 
 ## One-time setup (about 30-45 minutes)
 

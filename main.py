@@ -12,23 +12,22 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
 from trend_fetch import resolve_topic
 from seo_research import research_keywords
+from finance_research import research_finance
 from generate_script import generate_script
 from generate_voiceover import generate_voiceover
 from fetch_visuals import fetch_clips
-from generate_illustrations import generate_illustrations
 from assemble_video import assemble_video
 from generate_thumbnail import generate_thumbnail
 from upload_youtube import upload_video
 from select_music import pick_track
 from template_integration import apply_template_to_pipeline
-from performance_optimizer import media_duration
+from performance_optimizer import media_duration, validate_video_content
 
 WORK_DIR = "work"
 OUTPUT_DIR = "output"
 
-# Long-form video output directory
-LONGFORM_WORK_DIR = "work/longform"
-LONGFORM_OUTPUT_DIR = "output/longform"
+# The daily niche. Finance research runs on every scheduled upload.
+DEFAULT_TOPIC_CATEGORY = "finance"
 
 # Voiceover uses Piper (local, no API key needed) -- not in this list.
 REQUIRED_ENV_VARS = [
@@ -44,10 +43,9 @@ def _check_required_env_vars():
     # their API usage) only to hit a cryptic error on the last step because
     # a GitHub secret was never added or is empty.
     required = list(REQUIRED_ENV_VARS)
-    # Illustration mode generates visuals without Pexels, so it must not
-    # require a Pexels secret.
-    if os.environ.get("VISUAL_STYLE", "pexels").strip().lower() != "illustration":
-        required.append("PEXELS_API_KEY")
+    # Visuals are always royalty-free stock VIDEO, which comes from Pexels
+    # (with Pixabay/Mixkit as fallbacks), so Pexels is always required.
+    required.append("PEXELS_API_KEY")
     missing = [name for name in required if not os.environ.get(name, "").strip()]
     if missing:
         raise RuntimeError(
@@ -57,30 +55,83 @@ def _check_required_env_vars():
         )
 
 
+def _merge_keywords(*groups: list[str], limit: int = 25) -> list[str]:
+    """Case-insensitive de-dupe that preserves order across several sources."""
+    merged: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for keyword in group or []:
+            cleaned = " ".join(str(keyword).split())
+            if not cleaned:
+                continue
+            key = cleaned.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(cleaned)
+            if len(merged) >= limit:
+                return merged
+    return merged
+
+
 def run():
     _check_required_env_vars()
     os.makedirs(WORK_DIR, exist_ok=True)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    topic_mode = os.environ.get("TOPIC_MODE", "trending")
-    topic_category = os.environ.get("TOPIC_CATEGORY", "any")
+    topic_mode = os.environ.get("TOPIC_MODE", "category").strip() or "category"
+    topic_category = os.environ.get(
+        "TOPIC_CATEGORY", DEFAULT_TOPIC_CATEGORY
+    ).strip().lower() or DEFAULT_TOPIC_CATEGORY
     custom_topic = os.environ.get("CUSTOM_TOPIC", "")
     print(f"Step 1/7: Finding a topic (mode={topic_mode!r}, category={topic_category!r}, custom_topic={custom_topic!r})...")
-    if topic_mode == "custom" and not custom_topic.strip():
-        print("  WARNING: mode is 'custom' but custom_topic is blank -- falling back to trending.")
-    topic = resolve_topic(mode=topic_mode, category=topic_category, custom_topic=custom_topic)
-    print(f"  -> Topic: {topic}")
 
-    video_mode = os.environ.get("VIDEO_MODE", "video")
+    # Finance is the standing niche, so a scheduled run always researches the
+    # live web first and lets that research choose the topic. A custom-topic run
+    # is an explicit human choice and skips the research-driven selection (it
+    # still gets the SEO keyword research below).
+    do_finance_research = topic_mode == "category" and topic_category == "finance"
+    if topic_mode == "custom" and not custom_topic.strip():
+        print("  WARNING: mode is 'custom' but custom_topic is blank -- falling back to category mode.")
+        topic_mode = "category"
+
+    finance = None
+    topic = ""
+    if do_finance_research:
+        print("  Scraping live finance signals (news + Reddit + YouTube autocomplete + Trends)...")
+        finance = research_finance(category=topic_category)
+        topic = finance["topic"]
+        print(f"  -> Topic: {topic} (research source: {finance['source']})")
+        if finance.get("pain_points"):
+            print(f"  -> Real questions being answered: {finance['pain_points'][:3]}")
+    else:
+        topic = resolve_topic(mode=topic_mode, category=topic_category, custom_topic=custom_topic)
+        print(f"  -> Topic: {topic}")
+
+    video_mode = os.environ.get("VIDEO_MODE", "shorts")
     is_shorts = video_mode == "shorts"
 
     print("Step 2/7: Researching real search keywords (SEO)...")
-    seo_keywords = research_keywords(topic)
+    # Finance research already harvested YouTube autocomplete + Trends phrases
+    # for the winning topic, so it doubles as the SEO keyword source here.
+    seo_keywords = _merge_keywords(
+        (finance or {}).get("keywords") or [],
+        research_keywords(topic) if not do_finance_research else [],
+    )
     print(f"  -> Keywords: {seo_keywords[:5]}{'...' if len(seo_keywords) > 5 else ''}")
 
     language = os.environ.get("LANGUAGE", "english")
-    print(f"Step 3/7: Generating script + SEO metadata (language={language!r})...")
-    package = generate_script(topic, seo_keywords=seo_keywords, language=language)
+    print(f"Step 3/7: Generating script + SEO/AEO metadata (language={language!r})...")
+    package = generate_script(
+        topic,
+        seo_keywords=seo_keywords,
+        language=language,
+        is_shorts=is_shorts,
+        pain_points=(finance or {}).get("pain_points"),
+        headlines=(finance or {}).get("headlines"),
+        strategy=(finance or {}).get("strategy"),
+        compliance=(finance or {}).get("compliance"),
+    )
     print(f"  -> Title: {package['title']}")
 
     print(f"Step 4/7: Generating voiceover ({language})...")
@@ -91,37 +142,20 @@ def run():
     if music_path:
         print(f"  -> Background music: {os.path.basename(music_path)}")
 
-    voice_duration = media_duration(voiceover_path)    
-    # VisualProvider: "pexels" | "illustration"
-    visual_style = os.environ.get("VISUAL_STYLE", "pexels")
+    voice_duration = media_duration(voiceover_path)
     orientation = "portrait" if is_shorts else "landscape"
 
-    if visual_style == "illustration":
-        custom_visual_prompt = os.environ.get("CUSTOM_VISUAL_PROMPT", "").strip()
-        if custom_visual_prompt:
-            # An exact scene/image prompt drives the VISUALS only -- the
-            # narration above is unaffected and keeps coming from the topic,
-            # never from this prompt.
-            print(f"Step 5/7: Generating AI illustration clips from a custom prompt ({orientation})...")
-            illustration_prompts = [custom_visual_prompt] * len(package["visual_keywords"])
-        else:
-            print(f"Step 5/7: Generating AI illustration clips ({orientation})...")
-            illustration_prompts = package["visual_keywords"]
-        clip_paths = generate_illustrations(
-            illustration_prompts,
-            os.path.join(WORK_DIR, "clips"),
-            orientation=orientation,
-            vary_seed_per_clip=bool(custom_visual_prompt),
-        )
-    else:  # "pexels" (default)
-        print(f"Step 5/7: Fetching stock clips ({orientation})...")
-        clip_paths = fetch_clips(
-            package["visual_keywords"],
-            os.path.join(WORK_DIR, "clips"),
-            orientation=orientation,
-        )
+    # Visuals are always royalty-free stock VIDEO (Pexels -> Pixabay -> local
+    # Mixkit). No static-image path exists: moving footage is what keeps a
+    # Short from reading as a slideshow.
+    print(f"Step 5/7: Fetching royalty-free stock video clips ({orientation})...")
+    clip_paths = fetch_clips(
+        package["visual_keywords"],
+        os.path.join(WORK_DIR, "clips"),
+        orientation=orientation,
+    )
     if not clip_paths:
-        raise RuntimeError("No visual clips generated for any keyword - aborting.")
+        raise RuntimeError("No stock video clips could be fetched for any keyword - aborting.")
 
     template_config = apply_template_to_pipeline(
         topic, num_clips=len(clip_paths), duration=voice_duration,
@@ -135,6 +169,7 @@ def run():
         work_dir=WORK_DIR, vertical=is_shorts, narration=package["narration"],
         music_path=music_path, template_config=template_config,
     )
+    validate_video_content(video_path)
     thumbnail_path = os.path.join(OUTPUT_DIR, "thumbnail.jpg")
     generate_thumbnail(video_path, package["title"], thumbnail_path, _vertical=is_shorts)
 

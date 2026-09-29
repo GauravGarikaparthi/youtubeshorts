@@ -4,8 +4,7 @@ Generates thumbnails for YouTube Shorts (1080x1920) and long-form videos
 
 For Shorts: a center-cropped video frame with boosted color and a 3-word
 ultra-bold teaser in the upper-middle.
-For long-form: a high-contrast 16:9 frame with one clear focal point on the
-left and a max of 3 bold words (Visual Subtraction principle 5c).
+For long-form: a high-contrast 16:9 frame with centered, vibrant text.
 
 Requires ffmpeg for frame extraction. Uses Pillow only (already a dependency).
 """
@@ -21,9 +20,17 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 SHORTS_WIDTH = 1080
 SHORTS_HEIGHT = 1920
 
-# Long-form thumbnail: 16:9 aspect ratio (YouTube standard)
-LONFORM_WIDTH = 1280
-LONFORM_HEIGHT = 720
+LONGFORM_WIDTH = 1280
+LONGFORM_HEIGHT = 720
+
+VIBRANT_TEXT_COLORS = (
+    (255, 238, 0),
+    (0, 229, 255),
+    (255, 45, 85),
+    (255, 122, 0),
+    (132, 60, 255),
+    (52, 211, 153),
+)
 
 FONT_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "fonts", "Montserrat-Bold.ttf"
@@ -84,23 +91,59 @@ def _draw_text_with_stroke(
     xy: tuple[int, int],
     text: str,
     font: ImageFont.ImageFont,
-    fill: str = "white",
-    stroke: str = "black",
+    fill: str | tuple[int, int, int] = "white",
+    stroke: str | tuple[int, int, int] = "black",
     stroke_width: int = 8,
 ) -> None:
     draw.text(xy, text, font=font, fill=fill, stroke_width=stroke_width, stroke_fill=stroke)
+
+
+def _relative_luminance(rgb: tuple[int, int, int]) -> float:
+    channels = []
+    for value in rgb:
+        normalized = value / 255.0
+        channels.append(
+            normalized / 12.92 if normalized <= 0.04045
+            else ((normalized + 0.055) / 1.055) ** 2.4
+        )
+    return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+
+
+def _contrast_ratio(foreground: tuple[int, int, int], background: tuple[int, int, int]) -> float:
+    first = _relative_luminance(foreground)
+    second = _relative_luminance(background)
+    lighter, darker = max(first, second), min(first, second)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+def _average_color(img: Image.Image, box: tuple[int, int, int, int]) -> tuple[int, int, int]:
+    crop = img.crop(box)
+    if crop.width <= 0 or crop.height <= 0:
+        return (0, 0, 0)
+    return crop.resize((1, 1), Image.Resampling.BILINEAR).getpixel((0, 0))[:3]
+
+
+def _choose_vibrant_text_color(
+    img: Image.Image,
+    box: tuple[int, int, int, int],
+) -> tuple[int, int, int]:
+    background = _average_color(img, box)
+    return max(
+        VIBRANT_TEXT_COLORS,
+        key=lambda color: _contrast_ratio(color, background),
+    )
 
 
 def generate_thumbnail(video_path: str, title_text: str, out_path: str, _vertical: bool = False, longform: bool = False):
     """
     Generate a thumbnail for either Shorts (1080x1920) or long-form (1280x720).
 
-    _vertical:   legacy API-compat flag (Shorts portrait)
-    longform:    when True, emit a 16:9 1280x720 high-contrast thumbnail with
-                 one focal point on the left and max 3 bold words.
+    _vertical: legacy API-compat flag for a portrait Shorts thumbnail.
+    longform: emit a centered 16:9 thumbnail with vibrant, high-contrast text.
     """
+    longform = longform or not _vertical
     if longform:
-        width, height = LONFORM_WIDTH, LONFORM_HEIGHT
+        width, height = LONGFORM_WIDTH, LONGFORM_HEIGHT
     else:
         width, height = SHORTS_WIDTH, SHORTS_HEIGHT
 
@@ -116,12 +159,16 @@ def generate_thumbnail(video_path: str, title_text: str, out_path: str, _vertica
     overlay_draw = ImageDraw.Draw(overlay)
 
     if longform:
-        # Long-form: one clear focal point on the LEFT, dark gradient band
-        # on the left side for text readability (Visual Subtraction, rule 5c).
-        band_right = int(width * 0.45)
-        overlay_draw.rectangle([0, 0, band_right, height], fill=(0, 0, 0, 120))
+        panel_left = int(width * 0.14)
+        panel_top = int(height * 0.27)
+        panel_right = int(width * 0.86)
+        panel_bottom = int(height * 0.73)
+        overlay_draw.rounded_rectangle(
+            [panel_left, panel_top, panel_right, panel_bottom],
+            radius=24,
+            fill=(0, 0, 0, 155),
+        )
     else:
-        # Shorts: soft dark band behind the upper-middle teaser
         band_top = int(height * 0.22)
         band_bottom = int(height * 0.48)
         overlay_draw.rectangle([0, band_top, width, band_bottom], fill=(0, 0, 0, 150))
@@ -133,26 +180,44 @@ def generate_thumbnail(video_path: str, title_text: str, out_path: str, _vertica
     words = hook.split()
 
     if longform:
-        # Large, bold, left-side text for 16:9
         font_size = 84 if len(words) <= 3 else 64
         font = _load_font(font_size)
-        max_text_width = int(width * 0.40)
+        max_text_width = int(width * 0.66)
 
         while font_size > 36:
-            widest = max((draw.textlength(w, font=font) for w in words), default=0)
+            widest = max((draw.textlength(word, font=font) for word in words), default=0)
             if widest <= max_text_width:
                 break
             font_size -= 6
             font = _load_font(font_size)
 
         line_height = int(font_size * 1.12)
+        block_width = max((draw.textlength(word, font=font) for word in words), default=0)
         block_height = line_height * max(len(words), 1)
-        y = int(height * 0.40) - block_height // 2
+        panel_pad_x = max(20, int(width * 0.025))
+        panel_pad_y = max(12, int(font_size * 0.22))
+        text_box = (
+            max(12, (width - block_width) // 2 - panel_pad_x),
+            max(12, (height - block_height) // 2 - panel_pad_y),
+            min(width - 12, (width + block_width) // 2 + panel_pad_x),
+            min(height - 12, (height + block_height) // 2 + panel_pad_y),
+        )
+        fill = _choose_vibrant_text_color(img, text_box)
+        stroke = (0, 0, 0) if _relative_luminance(fill) > 0.45 else (255, 255, 255)
+        y = max(text_box[1], (height - block_height) // 2)
 
         for word in words:
             text_w = draw.textlength(word, font=font)
-            x = int(width * 0.08)  # left-side focal point
-            _draw_text_with_stroke(draw, (x, y), word, font, fill="#FFEE00", stroke="black", stroke_width=8)
+            x = (width - text_w) // 2
+            _draw_text_with_stroke(
+                draw,
+                (x, y),
+                word,
+                font,
+                fill=fill,
+                stroke=stroke,
+                stroke_width=8,
+            )
             y += line_height
     else:
         font_size = 118 if len(words) <= 3 else 96
@@ -160,7 +225,7 @@ def generate_thumbnail(video_path: str, title_text: str, out_path: str, _vertica
         max_text_width = width - 80
 
         while font_size > 48:
-            widest = max((draw.textlength(w, font=font) for w in words), default=0)
+            widest = max((draw.textlength(word, font=font) for word in words), default=0)
             if widest <= max_text_width:
                 break
             font_size -= 6
@@ -170,11 +235,22 @@ def generate_thumbnail(video_path: str, title_text: str, out_path: str, _vertica
         block_height = line_height * max(len(words), 1)
         y = int(height * 0.28) - block_height // 2
         y = max(band_top + 16, y)
+        band_box = (0, band_top, width, band_bottom)
+        fill = _choose_vibrant_text_color(img, band_box)
+        stroke = (0, 0, 0) if _relative_luminance(fill) > 0.45 else (255, 255, 255)
 
         for word in words:
             text_w = draw.textlength(word, font=font)
-            x = int((width - text_w) / 2)
-            _draw_text_with_stroke(draw, (x, y), word, font, fill="#FFEE00", stroke="black", stroke_width=10)
+            x = (width - text_w) // 2
+            _draw_text_with_stroke(
+                draw,
+                (x, y),
+                word,
+                font,
+                fill=fill,
+                stroke=stroke,
+                stroke_width=10,
+            )
             y += line_height
 
     img = img.filter(ImageFilter.UnsharpMask(radius=1, percent=80, threshold=3))
