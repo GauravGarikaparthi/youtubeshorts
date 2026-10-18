@@ -71,7 +71,7 @@ LENGTH CAPS (hard limits, do not exceed):
   target search term at the very beginning, capitalize the first letter, add a truthful \
   strong modifier or number, state the factual value or answer, and never use false \
   clickbait. The thumbnail should ask the visual question while the title gives the answer.
-- description: first line is exactly "#shorts". Then 3-5 SEO sentences. Soft CTA to subscribe.
+- description: first line is exactly "#shorts". Then 2-3 natural sentences total. Include the primary keyword 2-3 times across those sentences, written naturally for a human -- never keyword-stuffed. Weave a soft subscribe CTA into the final sentence.
 - tags: 8-12 items, include "shorts".
 
 Clear simple sentences, no fluff, no stage directions, no headers - just spoken narration \
@@ -144,10 +144,39 @@ def _primary_keyword(input_topic: str, seo_keywords: list[str] | None) -> str:
     return ""
 
 
-def _format_description(description: str) -> str:
-    body = (description or "").strip()
-    body = re.sub(r"^\s*#shorts\s*", "", body, flags=re.IGNORECASE)
-    return f"{SHORTS_TAG}\n{body}".strip()
+def _format_description(description: str, primary_keyword: str) -> str:
+    """First line is #shorts; then 2-3 natural sentences with the primary
+    keyword appearing 2-3 times, never keyword-stuffed."""
+    kw = (primary_keyword or "").strip()
+    body = re.sub(r"\s+", " ", (description or "").strip())
+    # Drop any existing #shorts line so we control line 1 exactly.
+    body = re.sub(r"(?i)^#shorts\b\s*", "", body).strip()
+
+    # Candidate sentences from the LLM output.
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", body) if s.strip()]
+
+    # Deterministic, natural fallback sentences built around the keyword.
+    fallback = [
+        f"{kw} is one of those topics everyone searches but few truly get.",
+        f"Here's the straight talk on {kw} and why it actually matters to you.",
+        f"After watching, you'll think about {kw} completely differently.",
+    ]
+
+    chosen = sentences if 2 <= len(sentences) <= 3 else fallback[:3]
+
+    # Guarantee the keyword shows up 2-3 times, naturally.
+    if kw:
+        joined = " ".join(chosen)
+        count = len(re.findall(re.escape(kw), joined, flags=re.IGNORECASE))
+        if count < 2:
+            chosen[-1] = chosen[-1].rstrip(".!?") + f", because {kw} changes everything."
+            joined = " ".join(chosen)
+            count = len(re.findall(re.escape(kw), joined, flags=re.IGNORECASE))
+        if count > 3:
+            joined = re.sub(re.escape(kw), "", joined, count=count - 3, flags=re.IGNORECASE).strip()
+            chosen = [s.strip() for s in re.split(r"(?<=[.!?])\s+", joined) if s.strip()][:3]
+
+    return f"{SHORTS_TAG}\n" + " ".join(chosen)
 
 
 def _normalize_package(
@@ -182,7 +211,7 @@ def _normalize_package(
     )
     return {
         "title": title,
-        "description": _format_description(str(package.get("description") or "")),
+        "description": _format_description(str(package.get("description") or ""), keyword),
         "tags": tags[:12],
         "narration": narration,
         "visual_keywords": [str(v).strip() for v in visual if str(v).strip()][:8],
@@ -248,7 +277,7 @@ Respond with ONLY this JSON structure:
 
 {{
   "title": "EXACT TOPIC first, factual value, strong modifier, max 70 chars including #shorts",
-  "description": "#shorts as line 1, then 3-5 SEO sentences, subscribe CTA last",
+  "description": "#shorts as line 1, then 2-3 natural sentences with the primary keyword 2-3 times, CTA woven into the last sentence",
   "tags": ["tag1", "tag2", "..."],
   "narration": "120-135 word spoken script. Sentence 1 is a 6-10 word high-tension hook.",
   "visual_keywords": ["keyword1", "keyword2", "keyword3", "..."]

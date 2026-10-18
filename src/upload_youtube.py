@@ -37,6 +37,7 @@ def upload_video(
     thumbnail_path: str | None = None,
     privacy_status: str = "public",
     category_id: str = "22",
+    default_language: str | None = None,
 ):
     try:
         creds = _get_credentials()
@@ -48,18 +49,30 @@ def upload_video(
             "then update the YT_REFRESH_TOKEN secret in GitHub repo settings."
         ) from exc
 
+    # YouTube uses defaultLanguage/defaultAudioLanguage to match the video to
+    # the right audience. Without it the Short gets no language signal and
+    # essentially no impressions -- the #1 reason new uploads get zero views.
+    language = (
+        default_language
+        or os.environ.get("YT_DEFAULT_LANGUAGE")
+        or "en-US"
+    )
+
     body = {
         "snippet": {
             "title": title[:100],
             "description": description,
             "tags": tags,
             "categoryId": category_id,
+            "defaultLanguage": language,
+            "defaultAudioLanguage": language,
         },
         "status": {
             "privacyStatus": privacy_status,
             "selfDeclaredMadeForKids": False,
         },
     }
+    print(f"[upload_youtube] Upload settings: language={language} category={category_id} privacy={privacy_status}")
 
     media = MediaFileUpload(video_path, chunksize=-1, resumable=True, mimetype="video/mp4")
     request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
