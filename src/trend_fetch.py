@@ -199,8 +199,13 @@ def get_trending_topic(country="united_states"):
 
 def get_topic_by_category(category: str) -> str:
     """Returns a random topic from a named category. 'any' picks from all categories."""
-    if category == "any" or category not in CATEGORY_TOPICS:
-        pool = [t for topics in CATEGORY_TOPICS.values() for t in topics]
+    import random
+    # Shuffle category for each workflow run - pick a random category
+    categories = list(CATEGORY_TOPICS.keys())
+    if category in ("any", "shuffle", "random", "") or category not in CATEGORY_TOPICS:
+        category = random.choice(categories)
+        print(f"[trend_fetch] Shuffled category selected: {category}")
+        pool = CATEGORY_TOPICS[category]
     else:
         pool = CATEGORY_TOPICS[category]
     return random.choice(pool)

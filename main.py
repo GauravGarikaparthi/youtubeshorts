@@ -7,6 +7,7 @@ trending topic -> script -> voiceover -> stock clips -> assembled video
 import os
 import sys
 import traceback
+import random
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
@@ -27,7 +28,7 @@ WORK_DIR = "work"
 OUTPUT_DIR = "output"
 
 # The daily niche. Finance research runs on every scheduled upload.
-DEFAULT_TOPIC_CATEGORY = "finance"
+DEFAULT_TOPIC_CATEGORY = "motivation"
 
 # Voiceover uses Piper (local, no API key needed) -- not in this list.
 REQUIRED_ENV_VARS = [
@@ -83,6 +84,12 @@ def run():
     topic_category = os.environ.get(
         "TOPIC_CATEGORY", DEFAULT_TOPIC_CATEGORY
     ).strip().lower() or DEFAULT_TOPIC_CATEGORY
+    # Shuffle category for each workflow run - always pick a random category
+    import random
+    from trend_fetch import CATEGORY_TOPICS
+    available_categories = list(CATEGORY_TOPICS.keys())
+    topic_category = random.choice(available_categories)
+    print(f"[main] Shuffled category selected for this run: {topic_category}")
     custom_topic = os.environ.get("CUSTOM_TOPIC", "")
     print(f"Step 1/7: Finding a topic (mode={topic_mode!r}, category={topic_category!r}, custom_topic={custom_topic!r})...")
 

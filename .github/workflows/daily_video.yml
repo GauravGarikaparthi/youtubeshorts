@@ -14,16 +14,16 @@ on:
           - category
           - custom
       category:
-        description: "Category to pick from. 'finance' researches the live web first and is the default."
+        description: "Category to pick from. 'motivation' is the default."
         type: choice
-        default: finance
+        default: motivation
         options:
+          - motivation
           - finance
           - any
           - facts
           - science
           - history
-          - motivation
           - animals
           - personality
           - sports
@@ -131,7 +131,7 @@ jobs:
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
           TOPIC_MODE: ${{ github.event.inputs.topic_mode || 'category' }}
-          TOPIC_CATEGORY: ${{ github.event.inputs.category || 'finance' }}
+          TOPIC_CATEGORY: ${{ github.event.inputs.category || 'motivation' }}
           CUSTOM_TOPIC: ${{ github.event.inputs.custom_topic || '' }}
           VIDEO_MODE: ${{ github.event.inputs.video_mode || 'shorts' }}
           LANGUAGE: ${{ github.event.inputs.language || 'english' }}
