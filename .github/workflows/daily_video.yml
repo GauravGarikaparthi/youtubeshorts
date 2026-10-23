@@ -81,10 +81,11 @@ jobs:
           python-version: "3.11"
 
       - name: Install ffmpeg + espeak-ng
-        timeout-minutes: 3
+        timeout-minutes: 10
+        continue-on-error: true
         run: |
-          sudo DEBIAN_FRONTEND=noninteractive apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ffmpeg espeak-ng
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update || true
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ffmpeg espeak-ng || true
 
       - name: Download Montserrat Bold font (clean bold sans-serif for captions/titles)
         run: |
@@ -93,7 +94,10 @@ jobs:
             https://raw.githubusercontent.com/JulietaUla/Montserrat/master/fonts/ttf/Montserrat-Bold.ttf
 
       - name: Install Python dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install groq 2>&1 | tail -2 || true
 
       - name: Cache Kokoro TTS model files
         uses: actions/cache@v4
