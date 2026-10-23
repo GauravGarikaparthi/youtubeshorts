@@ -11,3 +11,8 @@ google-auth-oauthlib>=1.2.0
 google-auth-httplib2>=0.2.0
 Pillow>=10.3.0
 python-dotenv>=1.0.1
+
+# High-retention post-processing stack (moviepy + ffmpeg)
+moviepy>=1.0.3
+numpy>=1.24.0
+opencv-python-headless>=4.8.0

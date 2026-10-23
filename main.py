@@ -10,18 +10,18 @@ import traceback
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
-from trend_fetch import resolve_topic
-from seo_research import research_keywords
-from finance_research import research_finance
-from generate_script import generate_script
-from generate_voiceover import generate_voiceover
-from fetch_visuals import fetch_clips
 from assemble_video import assemble_video
+from fetch_visuals import fetch_clips
+from finance_research import research_finance
+from generate_script import ensure_unique_metadata, generate_script
 from generate_thumbnail import generate_thumbnail
-from upload_youtube import upload_video
-from select_music import pick_track
-from template_integration import apply_template_to_pipeline
+from generate_voiceover import generate_voiceover
 from performance_optimizer import media_duration, validate_video_content
+from select_music import pick_track
+from seo_research import research_keywords
+from template_integration import apply_template_to_pipeline
+from trend_fetch import resolve_topic
+from upload_youtube import upload_video
 
 WORK_DIR = "work"
 OUTPUT_DIR = "output"
@@ -184,6 +184,11 @@ def run():
             title = title[:92].rstrip() + " #Shorts"
         if "#shorts" not in description.lower():
             description = description.rstrip() + "\n\n#Shorts"
+
+    # Ensure title, description, and tags are unique vs previously uploaded Shorts.
+    package = ensure_unique_metadata(package)
+    title = package["title"]
+    description = package["description"]
 
     video_id = upload_video(
         video_path=video_path,

@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from datetime import datetime, timezone
 
 from groq import Groq
 
@@ -146,7 +147,8 @@ def _primary_keyword(input_topic: str, seo_keywords: list[str] | None) -> str:
 
 def _format_description(description: str, primary_keyword: str) -> str:
     """First line is #shorts; then 2-3 natural sentences with the primary
-    keyword appearing 2-3 times, never keyword-stuffed."""
+    keyword appearing 2-3 times, never keyword-stuffed. Uses varied sentence
+    templates so each run produces a distinct description."""
     kw = (primary_keyword or "").strip()
     body = re.sub(r"\s+", " ", (description or "").strip())
     # Drop any existing #shorts line so we control line 1 exactly.
@@ -155,12 +157,26 @@ def _format_description(description: str, primary_keyword: str) -> str:
     # Candidate sentences from the LLM output.
     sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", body) if s.strip()]
 
-    # Deterministic, natural fallback sentences built around the keyword.
+    # Varied fallback templates -- rotated by keyword hash so each topic gets
+    # a different sentence shape, keeping descriptions unique across runs.
+    kw_seed = sum(ord(c) for c in kw.lower()) % 3
     fallback = [
-        f"{kw} is one of those topics everyone searches but few truly get.",
-        f"Here's the straight talk on {kw} and why it actually matters to you.",
-        f"After watching, you'll think about {kw} completely differently.",
-    ]
+        [
+            f"{kw} is one of those topics everyone searches but few truly get.",
+            f"Here's the straight talk on {kw} and why it actually matters to you.",
+            f"After watching, you'll think about {kw} completely differently.",
+        ],
+        [
+            f"The real story on {kw} isn't what most people assume.",
+            f"If you've been wondering about {kw}, here's what you need to know.",
+            f"{kw} explained plainly, with the parts that actually matter.",
+        ],
+        [
+            f"Most people overlook the one thing that makes {kw} work.",
+            f"Here's the no-nonsense breakdown of {kw} in under a minute.",
+            f"Walk away knowing exactly how {kw} fits into your bigger picture.",
+        ],
+    ][kw_seed]
 
     chosen = sentences if 2 <= len(sentences) <= 3 else fallback[:3]
 
@@ -177,6 +193,81 @@ def _format_description(description: str, primary_keyword: str) -> str:
             chosen = [s.strip() for s in re.split(r"(?<=[.!?])\s+", joined) if s.strip()][:3]
 
     return f"{SHORTS_TAG}\n" + " ".join(chosen)
+
+
+def _load_previous_uploads() -> list[dict]:
+    """Load previously uploaded Shorts metadata from work/shorts_uploads.json."""
+    path = os.path.join("work", "shorts_uploads.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except (json.JSONDecodeError, OSError, FileNotFoundError):
+        return []
+
+
+def _metadata_signature(title: str, description: str, tags: list[str]) -> str:
+    """Build a normalized signature for dedup comparison."""
+    parts = [
+        re.sub(r"\s+", " ", title or "").strip().lower(),
+        re.sub(r"\s+", " ", description or "").strip().lower(),
+        ",".join(sorted(t.lower().strip() for t in (tags or []))),
+    ]
+    return "|".join(parts)
+
+
+def ensure_unique_metadata(
+    package: dict,
+    previous_uploads: list[dict] | None = None,
+) -> dict:
+    """
+    Ensure the package's title, description, and tags are unique compared to
+    previously uploaded Shorts. If a near-duplicate is detected, append a
+    run-specific variation (date + sequence) to the title and description to
+    break the match while keeping SEO intact.
+    """
+    if previous_uploads is None:
+        previous_uploads = _load_previous_uploads()
+
+    title = str(package.get("title", ""))
+    description = str(package.get("description", ""))
+    tags = list(package.get("tags", []))
+
+    sig = _metadata_signature(title, description, tags)
+    seen_signatures = {
+        _metadata_signature(
+            r.get("title", ""),
+            r.get("description_used", r.get("description", "")),
+            r.get("tags", []),
+        )
+        for r in previous_uploads
+    }
+
+    if sig not in seen_signatures:
+        return package
+
+    # Duplicate detected -- break it with a date-stamped variation.
+    stamp = datetime.now(timezone.utc).strftime("%b %d")
+    title_key = title.rsplit(" #shorts", 1)[0].rsplit(" #Shorts", 1)[0]
+    new_title = f"{title_key} ({stamp})"
+    new_title = format_youtube_title(
+        new_title,
+        str(package.get("visual_keywords", [""])[0] or ""),
+        suffix=f" {SHORTS_TAG}",
+        default_modifier="Easy Guide",
+    )[:100]
+
+    new_description = description.replace(SHORTS_TAG, "", 1).strip()
+    new_description = f"{SHORTS_TAG}\nUpdated {stamp}: " + new_description
+
+    return {
+        "title": new_title,
+        "description": new_description,
+        "tags": tags,
+        "narration": package.get("narration", ""),
+        "visual_keywords": package.get("visual_keywords", []),
+        "thumbnail_hook": package.get("thumbnail_hook", ""),
+    }
 
 
 def _normalize_package(
